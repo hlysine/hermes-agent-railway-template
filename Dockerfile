@@ -2,15 +2,6 @@ FROM nousresearch/hermes-agent:latest
 
 USER root
 
-# Copy the uv binary directly from its official image stage
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-# Compile hindsight-client cleanly into Hermes' environment
-RUN uv pip install --python /opt/hermes/.venv/bin/python "hindsight-client>=0.4.22"
-
-# Clean up the uv binary to keep your image slim
-RUN rm /usr/local/bin/uv
-
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/hermes-railway-entrypoint
 
 ENV HERMES_HOME=/data/.hermes \
