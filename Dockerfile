@@ -5,8 +5,7 @@ USER root
 # The official image refuses on-demand dependency installs, so the Hindsight
 # memory-provider SDK is baked into the shipped venv instead of being fetched
 # on the first agent turn. The range matches the plugin's own declaration.
-RUN uv="$(/usr/local/bin/python3 -c 'from pm import installed_package; print(installed_package("uv").binary)')" && \
-    "$uv" pip install --no-cache --python /opt/hermes/.venv/bin/python 'hindsight-client>=0.10.1,<1' && \
+RUN uv pip install --no-cache --python /opt/hermes/.venv/bin/python 'hindsight-client>=0.10.1,<1' && \
     /opt/hermes/.venv/bin/python -c 'import hindsight_client'
 
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/hermes-railway-entrypoint
