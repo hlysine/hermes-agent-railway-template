@@ -2,7 +2,9 @@ FROM nousresearch/hermes-agent:latest
 
 USER root
 
-RUN /opt/hermes/.venv/bin/python -m pip install --no-cache-dir "hindsight-client>=0.4.22"
+RUN python3 -m pip install --no-cache-dir \
+    --target=/opt/hermes/.venv/lib/python3.13/site-packages \
+    "hindsight-client>=0.4.22"
 
 COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/hermes-railway-entrypoint
 
