@@ -26,8 +26,6 @@ Use these service settings:
 
 Railway continues building this GitHub repository so existing template consumers receive update notifications. The compatibility entrypoint only translates legacy environment variables, then executes the official image's `/init`; s6-overlay still supervises the Hermes gateway and dashboard.
 
-The published image disables on-demand dependency installs, so the Dockerfile bakes `hindsight-client` into `/opt/hermes/.venv` at build time. The Hindsight memory provider's SDK is therefore importable on first boot; select the provider with `hermes memory setup` and set `HINDSIGHT_API_KEY` in the dashboard.
-
 ### Variables
 
 ```dotenv
