@@ -52,6 +52,24 @@ The entrypoint maps `PORT` to `HERMES_DASHBOARD_PORT` at runtime.
 
 Provider credentials, messaging channels, models, skills, profiles, and gateway state are managed through the official dashboard and persisted under `/data/.hermes`.
 
+### Dependency storage
+
+Hermes writes rebuildable Python dependency state under `$HERMES_HOME`: `installs/` holds the PM dependency generations (full venv trees), and `cache/uv` plus `cache/partials` hold the wheel cache and the downloader's content-addressed archives. On a size-capped volume this is the dominant consumer, and none of it is worth persisting — a redeploy rebuilds the image anyway.
+
+The entrypoint therefore symlinks those three subdirectories to container-local scratch and keeps only real state on the volume:
+
+| Path on the volume | Symlink target |
+|---|---|
+| `/data/.hermes/installs` | `/opt/hermes-deps/installs` |
+| `/data/.hermes/cache/uv` | `/opt/hermes-deps/cache/uv` |
+| `/data/.hermes/cache/partials` | `/opt/hermes-deps/cache/partials` |
+
+Override the destination with `HERMES_DEPS_ROOT` when the container has a larger scratch mount or a second volume. If it resolves inside `HERMES_HOME` the relocation is skipped with a warning, since the links would nest into themselves.
+
+Existing deployments are migrated on the next boot: directory contents are moved across, skipping anything already present at the destination. Because the targets live in the container's writable layer, dependency state is discarded on redeploy and re-resolved on first use — this costs startup time after a deploy and is the intended trade for the quota.
+
+The links cover the default home only. Each additional [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) keeps its own `installs/` under `/data/.hermes/profiles/<name>`, which a boot-time sweep cannot predict because profiles are created at runtime. Single-gateway deployments — the configuration this template documents — are unaffected.
+
 ## Upgrading Hermes
 
 Update the pinned release and digest in `Dockerfile` deliberately after reviewing the upstream [release notes](https://github.com/NousResearch/hermes-agent/releases) and validating the new image. Do not use `latest`. Because the template remains GitHub-backed, merging an upgrade to the default branch notifies existing template consumers.
