@@ -64,21 +64,22 @@ Each refresh opens a fresh TLS connection because `platform_httpx_limits()` sets
 
 ### Dependency storage
 
-Hermes writes rebuildable Python dependency state under `$HERMES_HOME`: `installs/` holds the PM dependency generations (full venv trees), and `cache/uv` plus `cache/partials` hold the wheel cache and the downloader's content-addressed archives. On a size-capped volume this is the dominant consumer, and none of it is worth persisting — a redeploy rebuilds the image anyway.
+Hermes keeps Python dependency state under `$HERMES_HOME` in two kinds of directory, and only one of them is a cache.
 
-The entrypoint therefore symlinks those three subdirectories to container-local scratch and keeps only real state on the volume:
+`installs/` holds the recorded PM selection plus the venv generations it selects. It is runtime state: the selection decides which extras the gateway boots onto. The image bakes `all`, `messaging`, `otlp`, `anthropic`, `bedrock`, `azure-identity`, `matrix`, and `google-chat`, records them as the baseline (`--record-selection` at image build), and stage2's dependency refresh restores that baseline into volumes that lost it — but only into a **real directory**. Diverting `installs/` to ephemeral scratch loses the selection, and the next boot runs a generation without the baked extras; the signature failure is `Webhook: aiohttp not installed` / `API Server: aiohttp not installed`, because aiohttp ships in `messaging`. `installs/` therefore stays on the volume, and the entrypoint heals the symlink an earlier version of this template created there.
+
+`cache/uv` (wheel cache) and `cache/partials` (downloader archives) are machine-scoped and genuinely rebuildable, so the entrypoint symlinks them to container-local scratch:
 
 | Path on the volume | Symlink target |
 |---|---|
-| `/data/.hermes/installs` | `/opt/hermes-deps/installs` |
 | `/data/.hermes/cache/uv` | `/opt/hermes-deps/cache/uv` |
 | `/data/.hermes/cache/partials` | `/opt/hermes-deps/cache/partials` |
 
-Override the destination with `HERMES_DEPS_ROOT` when the container has a larger scratch mount or a second volume. If it resolves inside `HERMES_HOME` the relocation is skipped with a warning, since the links would nest into themselves.
+Override the destination with `HERMES_DEPS_ROOT` when the container has a larger scratch mount or a second volume. If it resolves inside `HERMES_HOME` the relocation is skipped with a warning, since the links would nest into themselves. Existing cache directories are migrated on the next boot (destination-wins on collision); because the targets live in the container's writable layer, they are discarded on redeploy and re-fetched on demand.
 
-Existing deployments are migrated on the next boot: directory contents are moved across, skipping anything already present at the destination. Because the targets live in the container's writable layer, dependency state is discarded on redeploy and re-resolved on first use — this costs startup time after a deploy and is the intended trade for the quota.
+For the memory stack: `httpx==0.28.1`, `packaging==26.0`, and `psutil==7.2.2` are core pins in the Hermes image and `aiohttp==3.14.3` arrives with the baked `messaging` extra, so all four import from the selected generation without any Dockerfile install step. Baking packages into `/opt/hermes/.venv` cannot reach a generation anyway — PM resolves generations from the lock, the recorded extras, and enabled plugin declarations. Custom dependencies belong in the plugin's own `pyproject.toml` under `$HERMES_HOME/plugins/<name>/`; PM admits those declarations into the environment.
 
-The links cover the default home only. Each additional [profile](https://hermes-agent.nousresearch.com/docs/user-guide/profiles) keeps its own `installs/` under `/data/.hermes/profiles/<name>`, which a boot-time sweep cannot predict because profiles are created at runtime. Single-gateway deployments — the configuration this template documents — are unaffected.
+If `installs/` still dominates the volume quota, stale generations are the usual cause. Stage2 already collects generations nothing selects on every boot (`collect_generations`); the lever for anything larger is removing the plugin or extra that created it (`hermes plugins remove <name>`, `hermes memory off`), not relocating the directory.
 
 ## Upgrading Hermes
 

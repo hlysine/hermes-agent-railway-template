@@ -22,13 +22,26 @@ export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$dashboard_username"
 export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$dashboard_password"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$dashboard_secret"
 
-# Python dependency state lives under $HERMES_HOME, which is a size-capped
-# volume here. Redirect the rebuildable parts to container-local scratch so PM
-# venv generations and the uv wheel cache do not consume the volume quota.
+# Python dependency state under $HERMES_HOME splits into two kinds.
+# installs/ holds the recorded PM selection plus its venv generations:
+# runtime state, not a cache. The image's stage2 dependency refresh restores
+# the baked extras baseline (all, messaging, otlp, ...) only into a real
+# directory there; a diverted selection boots a generation without aiohttp
+# ("Webhook/API Server: aiohttp not installed"). So installs/ stays on the
+# volume. cache/uv and cache/partials are machine-scoped rebuildable caches,
+# so those move to container-local scratch to spare the size-capped volume.
 hermes_home="${HERMES_HOME:-/data/.hermes}"
 deps_root="${HERMES_DEPS_ROOT:-/opt/hermes-deps}"
 
-relocate_deps() {
+# Heal deployments created by the earlier entrypoint, which symlinked
+# installs/ to ephemeral scratch and lost the recorded selection.
+if [ -L "$hermes_home/installs" ]; then
+    echo "Healing $hermes_home/installs: removing symlink left by an earlier" \
+         "entrypoint; stage2 will restore the image dependency baseline."
+    rm -f "$hermes_home/installs"
+fi
+
+relocate_cache() {
     link="$hermes_home/$1"
     target="$deps_root/$1"
 
@@ -59,15 +72,15 @@ relocate_deps() {
 
 case "$deps_root/" in
     "$hermes_home/" | "$hermes_home"/*)
-        echo "Warning: HERMES_DEPS_ROOT is inside HERMES_HOME; leaving dependencies in place"
+        echo "Warning: HERMES_DEPS_ROOT is inside HERMES_HOME; leaving caches in place"
         ;;
     *)
-        for dep in installs cache/uv cache/partials; do
-            relocate_deps "$dep"
+        for dep in cache/uv cache/partials; do
+            relocate_cache "$dep"
         done
-        # The runtime UID is only remapped by the upstream stage2 hook after this
-        # script, and that hook chowns nothing under $deps_root, so widen mode
-        # bits rather than setting ownership.
+        # The runtime UID is only remapped by the upstream stage2 hook after
+        # this script, and that hook chowns nothing under $deps_root, so widen
+        # mode bits rather than setting ownership.
         chmod -R a+rwX "$deps_root" 2>/dev/null || true
         ;;
 esac
