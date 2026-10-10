@@ -52,6 +52,16 @@ The entrypoint maps `PORT` to `HERMES_DASHBOARD_PORT` at runtime.
 
 Provider credentials, messaging channels, models, skills, profiles, and gateway state are managed through the official dashboard and persisted under `/data/.hermes`.
 
+### Telegram webhook mode and Serverless
+
+Railway suspends a service after 5 minutes with no outbound packets, and wakes it on inbound traffic. Webhook mode is the right direction here, but three things in the Telegram adapter defeat it:
+
+1. **Idle keepalive probes (30s).** The fallback-IP transport sets `SO_KEEPALIVE` with a 30-second idle probe so a wedged `getUpdates` long-poll errors out instead of hanging. The probe is kernel-level so it logs nothing, and httpcore only prunes expired keepalive connections when a *new* request arrives, so one idle socket from the connect burst is probed forever. Webhook mode has no long-poll, so it buys nothing. Set `HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=true` for the plain `api.telegram.org` path, which injects no socket options.
+
+2. **Periodic identity refresh (300s).** Webhook mode calls `get_me()` every `_BOT_IDENTITY_TTL_SECONDS` — 300s upstream, exactly Railway's idle window — so the silence never completes. No env var or `telegram.extra` key controls it, so the `Dockerfile` patches the constant to 3600s at build time and asserts the substitution matched. BotFather renames then take up to an hour to propagate; restart the gateway to pick one up sooner.
+
+Each refresh opens a fresh TLS connection because `platform_httpx_limits()` sets `keepalive_expiry=2.0`, which is why the network graph shows multi-kilobyte inbound/outbound pairs rather than one small packet. Hermes' own `scale_to_zero` does not help: it arms only when messaging is relay-only or absent and a Fly/NAS suspend lever exists, so a directly-connected platform such as Telegram disqualifies it.
+
 ### Dependency storage
 
 Hermes writes rebuildable Python dependency state under `$HERMES_HOME`: `installs/` holds the PM dependency generations (full venv trees), and `cache/uv` plus `cache/partials` hold the wheel cache and the downloader's content-addressed archives. On a size-capped volume this is the dominant consumer, and none of it is worth persisting — a redeploy rebuilds the image anyway.
