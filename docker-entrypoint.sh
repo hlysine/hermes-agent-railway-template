@@ -22,23 +22,62 @@ export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$dashboard_username"
 export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$dashboard_password"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$dashboard_secret"
 
-# Python dependency state under $HERMES_HOME splits into two kinds.
-# installs/ holds the recorded PM selection plus its venv generations:
-# runtime state, not a cache. The image's stage2 dependency refresh restores
-# the baked extras baseline (all, messaging, otlp, ...) only into a real
-# directory there; a diverted selection boots a generation without aiohttp
-# ("Webhook/API Server: aiohttp not installed"). So installs/ stays on the
-# volume. cache/uv and cache/partials are machine-scoped rebuildable caches,
-# so those move to container-local scratch to spare the size-capped volume.
+# PM dependency state under $HERMES_HOME splits in two:
+#
+#  - installs/ holds the recorded selection plus the venv generations it
+#    selects. The gateway launches as `python -P -c "... addsitedir($HERMES_SITE) ..."`,
+#    and -P makes the selected generation the ONLY import path — the sealed
+#    /opt/hermes/.venv is never consulted. aiohttp ships in the baked `messaging`
+#    extra, not core, so a narrowed selection loses exactly the webhook and
+#    api_server adapters while core pins keep importing. It stays on the volume.
+#
+#  - cache/uv and cache/partials are machine-scoped rebuildable caches. They
+#    move to container-local scratch so they never touch the volume quota; the
+#    cost is a cold re-fetch on first use after each recreate.
 hermes_home="${HERMES_HOME:-/data/.hermes}"
 deps_root="${HERMES_DEPS_ROOT:-/opt/hermes-deps}"
 
 # Heal deployments created by the earlier entrypoint, which symlinked
 # installs/ to ephemeral scratch and lost the recorded selection.
-if [ -L "$hermes_home/installs" ]; then
-    echo "Healing $hermes_home/installs: removing symlink left by an earlier" \
-         "entrypoint; stage2 will restore the image dependency baseline."
-    rm -f "$hermes_home/installs"
+restore_installs() {
+    link="$hermes_home/installs"
+    [ -L "$link" ] || return 0
+
+    target="$(readlink "$link")"
+    case "$target" in
+        /*) ;;
+        *) target="$deps_root/$target" ;;
+    esac
+    rm -f "$link"
+
+    if [ -d "$target" ] && [ -n "$(ls -A "$target" 2>/dev/null)" ]; then
+        mkdir -p "$link" || return 0
+        find "$target" -mindepth 1 -maxdepth 1 2>/dev/null | while IFS= read -r child; do
+            [ -e "$link/$(basename "$child")" ] || mv "$child" "$link/" || true
+        done
+        chown -R hermes:hermes "$link" 2>/dev/null || true
+        echo "Restored $link onto the volume from $target"
+    else
+        echo "Removed stale symlink $link; stage2 restores the dependency baseline"
+    fi
+}
+
+restore_installs
+
+# A selection that lost the baked extras cannot be repaired in place: PM builds
+# each later generation from the recorded selection as its baseline, and stage2
+# only re-seeds a volume that has *no* selection. Drop the narrowed keys so
+# stage2 re-seeds the image baseline; this is what stops the crash-loop that
+# otherwise stacks a fresh ~1 GB generation per restart.
+if [ -d "$hermes_home/installs" ]; then
+    for facts in "$hermes_home"/installs/*/facts.json; do
+        [ -f "$facts" ] || continue
+        if ! grep -q '"messaging"' "$facts"; then
+            echo "Dropping narrowed dependency selection $(dirname "$facts");" \
+                 "stage2 will re-seed the image baseline"
+            rm -rf "$(dirname "$facts")"
+        fi
+    done
 fi
 
 relocate_cache() {
