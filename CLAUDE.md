@@ -2,16 +2,20 @@
 
 ## Architecture
 
-Python/Starlette web server that wraps Hermes Agent's gateway as a managed subprocess.
+Dockerfile wrapper around the official `nousresearch/hermes-agent` image. The
+template adds a compatibility entrypoint, the community Hermes Web UI, and a
+Railway volume contract.
 
-- `server.py` — Main server: HTTP handlers, gateway process manager, basic auth, .env file management
-- `templates/index.html` — Single-page UI with Tailwind CSS + Alpine.js
-- Config is stored as a flat `.env` file at `/data/.hermes/.env` (Hermes uses python-dotenv)
-- Gateway is spawned via `hermes gateway` command with env vars from the .env file
+- `Dockerfile` — pins the upstream image, patches the Telegram identity-refresh TTL, vendors `hermes-webui` into `/opt/hermes-webui`, sets the env contract
+- `docker-entrypoint.sh` — legacy variable translation (dashboard basic auth, Web UI password/port), PM dependency-cache relocation, then dispatches to `/init`
+- `webui-main.sh` — the container's main program: supervises the Web UI as a background child, then `exec`s the upstream `main-wrapper.sh`
+- `railway.toml` — build/start command, `/health` health check, restart policy
+- Config and all persistent Hermes state live on the Railway volume at `/data`, with `HERMES_HOME=/data/.hermes` (5 GB quota)
 
 ## Key patterns
 
-- Gateway lifecycle: start/stop/restart via async subprocess, stdout captured to ring buffer
-- Secret masking: password fields show first 8 chars + `***`, merge on save preserves masked values
-- No direct Hermes Python imports — the server manages the .env file independently
-- Auto-start: gateway starts on server boot if any provider API key is configured
+- The built-in `hermes dashboard` is disabled (`HERMES_DASHBOARD=0`); the Web UI is the browser surface and listens on `PORT`
+- Hermes Web UI runs in-process with the agent (`HERMES_WEBUI_AGENT_DIR=/opt/hermes`), on the agent's own interpreter and PM dependency generation — never pip-install anything for it, and never add a Python dependency to the image
+- Anything the Web UI or entrypoint writes must stay off the volume unless it is real state: `HOME=/opt/data`, logs to stdout, caches symlinked to `/opt/hermes-deps`
+- The Web UI is a background child of the main program, not an s6 service, so its logs reach `railway logs` and the container still exits with the gateway
+- Gateway lifecycle is upstream's: `/init` (s6-overlay) runs cont-init/stage2, then the main wrapper exec's `hermes gateway run`

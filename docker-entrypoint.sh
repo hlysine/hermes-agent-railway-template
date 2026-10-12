@@ -6,7 +6,7 @@ dashboard_password="${HERMES_DASHBOARD_BASIC_AUTH_PASSWORD:-${ADMIN_PASSWORD:-}}
 
 if [ -z "$dashboard_password" ]; then
     dashboard_password="$(python -c 'import secrets; print(secrets.token_urlsafe(16))')"
-    echo "Generated admin password: $dashboard_password"
+    echo "Generated admin password (dashboard and Web UI login): $dashboard_password"
 fi
 
 dashboard_secret="${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}"
@@ -21,6 +21,14 @@ export HERMES_DASHBOARD_PORT="${HERMES_DASHBOARD_PORT:-${PORT:-8080}}"
 export HERMES_DASHBOARD_BASIC_AUTH_USERNAME="$dashboard_username"
 export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD="$dashboard_password"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$dashboard_secret"
+
+# Hermes Web UI replaces the built-in dashboard as the browser surface, so it
+# takes the same PORT and the same credential. The dashboard's own s6 service
+# stays disabled (HERMES_DASHBOARD=0 in the Dockerfile); these four exports are
+# what a re-enabled dashboard would still need, and the legacy names keep
+# existing deployments logging in with the password they already have.
+export HERMES_WEBUI_PORT="${HERMES_WEBUI_PORT:-${PORT:-8787}}"
+export HERMES_WEBUI_PASSWORD="${HERMES_WEBUI_PASSWORD:-$dashboard_password}"
 
 # PM dependency state under $HERMES_HOME splits in two:
 #
@@ -124,4 +132,38 @@ case "$deps_root/" in
         ;;
 esac
 
-exec /opt/hermes/docker/entrypoint-dispatch.sh "$@"
+# The Web UI's workspace is the only directory under the volume root the runtime
+# user has to create for itself: /data arrives root-owned, and stage2 chowns
+# nothing outside $HERMES_HOME. Prepare it here, world-writable rather than
+# chowned, because stage2 may still remap the hermes UID to HERMES_UID after this
+# script runs and an ownership set now would strand it on the old UID. Matched
+# against /data/* so an override cannot widen permissions elsewhere; the Web UI
+# falls back to a container-local workspace if this fails.
+webui_workspace="${HERMES_WEBUI_DEFAULT_WORKSPACE:-/data/workspace}"
+case "$webui_workspace" in
+    /data/*)
+        mkdir -p "$webui_workspace" 2>/dev/null \
+            && chmod 1777 "$webui_workspace" 2>/dev/null \
+            || echo "Warning: could not prepare $webui_workspace; the Web UI will use a container-local workspace"
+        ;;
+esac
+
+# Upstream's entrypoint-dispatch.sh is not reusable here: it hard-codes
+# /opt/hermes/docker/main-wrapper.sh as the main program, and the WebUI needs a
+# hook between /init's cont-init (stage2) and that wrapper — the WebUI must start
+# after the UID remap and the dependency refresh, and it must inherit the
+# container's stdout. So dispatch's two branches are reproduced here with
+# hermes-railway-main substituted for main-wrapper; that wrapper exec's
+# main-wrapper.sh unchanged once the WebUI is supervised.
+if [ "$$" -eq 1 ]; then
+    exec /init /usr/local/bin/hermes-railway-main "$@"
+fi
+
+echo "[hermes] WARNING: container entrypoint is not PID 1; skipping s6-overlay " \
+    "/init and falling back to direct bootstrap. Supervised services are " \
+    "unavailable in this runtime, but the requested command will still run." >&2
+# /init normally seeds PATH with s6's helpers; the non-PID-1 fallback skips it,
+# and hermes-railway-main needs s6-setuidgid to drop the WebUI to hermes.
+export PATH="/command:/package/admin/s6/command:${PATH}"
+/opt/hermes/docker/stage2-hook.sh
+exec /usr/local/bin/hermes-railway-main "$@"

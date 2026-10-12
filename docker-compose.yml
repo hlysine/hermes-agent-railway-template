@@ -11,11 +11,18 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me}
       HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_BASIC_AUTH_SECRET:-}
+      # The Web UI is the browser surface here; the built-in dashboard is off.
+      # Empty values fall through to the entrypoint, which derives the port from
+      # PORT and the password from ADMIN_PASSWORD.
+      HERMES_WEBUI_ENABLED: ${HERMES_WEBUI_ENABLED:-1}
+      HERMES_WEBUI_PORT: ${HERMES_WEBUI_PORT:-}
+      HERMES_WEBUI_PASSWORD: ${HERMES_WEBUI_PASSWORD:-}
+      HERMES_WEBUI_DEFAULT_WORKSPACE: ${HERMES_WEBUI_DEFAULT_WORKSPACE:-/data/workspace}
     volumes:
       - ./data:/data
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:${PORT:-8080}/api/status"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:${PORT:-8080}/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 30s
+      start_period: 60s

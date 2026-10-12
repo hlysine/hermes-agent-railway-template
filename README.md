@@ -1,6 +1,6 @@
 # Hermes Agent Railway Template
 
-Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Railway using the official Nous Research image, dashboard, and s6 process supervision. A minimal compatibility entrypoint maps variables from existing template deployments before handing control to the upstream `/init` process.
+Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) on Railway using the official Nous Research image and s6 process supervision, with the community [Hermes Web UI](https://github.com/nesquena/hermes-webui) baked in as the browser surface in place of the built-in dashboard. A minimal compatibility entrypoint maps variables from existing template deployments before handing control to the upstream `/init` process.
 
 [![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/hermes-agent)
 
@@ -20,11 +20,11 @@ Use these service settings:
 |---|---|
 | Start command | `/usr/local/bin/hermes-railway-entrypoint gateway run` |
 | Volume mount | `/data` |
-| Public port | `8080` |
-| Health-check path | `/api/status` |
+| Public port | `8080` (Web UI; leave unexposed if you reach it over Tailscale) |
+| Health-check path | `/health` |
 | Replicas | `1` |
 
-Railway continues building this GitHub repository so existing template consumers receive update notifications. The compatibility entrypoint only translates legacy environment variables, then executes the official image's `/init`; s6-overlay still supervises the Hermes gateway and dashboard.
+Railway continues building this GitHub repository so existing template consumers receive update notifications. The compatibility entrypoint only translates legacy environment variables, then executes the official image's `/init`; s6-overlay still supervises the Hermes gateway, and the entrypoint's main-program wrapper supervises the Web UI.
 
 ### Variables
 
@@ -34,23 +34,58 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=<generated-password>
 ```
 
-The compatibility entrypoint maps the existing `ADMIN_USERNAME` and sealed `ADMIN_PASSWORD` values to the official dashboard variables before starting `/init`. Existing deployments therefore keep the same login without adding, copying, revealing, or re-entering credentials. It does not modify `config.yaml`. If `ADMIN_PASSWORD` is absent, it generates and logs a password as the previous template did.
+The compatibility entrypoint maps the existing `ADMIN_USERNAME` and sealed `ADMIN_PASSWORD` values to the official dashboard variables before starting `/init`, and reuses `ADMIN_PASSWORD` as the Web UI login. Existing deployments therefore keep the same login without adding, copying, revealing, or re-entering credentials. It does not modify `config.yaml`. If `ADMIN_PASSWORD` is absent, it generates and logs a password as the previous template did.
 
 For zero-interaction migration, a stable 32-byte dashboard session-signing secret is derived from `ADMIN_PASSWORD`. Derivation supports legacy passwords shorter than Hermes's 16-byte minimum signing-key length while preserving the existing login. After migration, operators may add `HERMES_DASHBOARD_BASIC_AUTH_SECRET` as an independent sealed value containing at least 32 random bytes. Rotating only this secret logs dashboard users out; it does not change the dashboard password or Hermes data. Neither the password nor the derived secret is written to `config.yaml`.
 
-The Dockerfile supplies the remaining official variables:
+The Dockerfile supplies the remaining variables:
 
 ```dotenv
 HERMES_HOME=/data/.hermes
 HERMES_WRITE_SAFE_ROOT=/data/.hermes
-HERMES_DASHBOARD=1
-HERMES_DASHBOARD_HOST=0.0.0.0
 HERMES_GATEWAY_BOOTSTRAP_STATE=running
+
+HERMES_DASHBOARD=0
+HERMES_DASHBOARD_HOST=0.0.0.0
+
+HERMES_WEBUI_ENABLED=1
+HERMES_WEBUI_SRC=/opt/hermes-webui
+HERMES_WEBUI_HOST=0.0.0.0
+HERMES_WEBUI_AGENT_DIR=/opt/hermes
+HERMES_WEBUI_PYTHON=/opt/hermes/.venv/bin/python
+HERMES_WEBUI_SKIP_ONBOARDING=1
+HERMES_WEBUI_AUTO_INSTALL=0
+HERMES_WEBUI_DEFAULT_WORKSPACE=/data/workspace
 ```
 
-The entrypoint maps `PORT` to `HERMES_DASHBOARD_PORT` at runtime.
+The entrypoint maps `PORT` to `HERMES_WEBUI_PORT` (and to `HERMES_DASHBOARD_PORT`, for the re-enabled-dashboard path below) at runtime, and `ADMIN_PASSWORD` to `HERMES_WEBUI_PASSWORD`.
 
-Provider credentials, messaging channels, models, skills, profiles, and gateway state are managed through the official dashboard and persisted under `/data/.hermes`.
+Provider credentials, messaging channels, models, skills, profiles, and gateway state are managed through the Web UI and persisted under `/data/.hermes`.
+
+### Web UI
+
+[Hermes Web UI](https://github.com/nesquena/hermes-webui) is a community browser surface for the agent — sessions, chat, workspace file browser, settings. It is baked into this image and started beside the gateway, so it reads and writes the same `$HERMES_HOME`. The built-in `hermes dashboard` is turned off (`HERMES_DASHBOARD=0`) because the two would compete for the same port and the same job; the dashboard's s6 slot is left in place, so setting `HERMES_DASHBOARD=1` plus `HERMES_DASHBOARD_PORT=8081` brings it back without a rebuild.
+
+**Lifecycle.** The Web UI is not an s6 service. The entrypoint's `hermes-railway-main` wrapper starts it as a background child after cont-init (so the UID remap and the PM dependency refresh are already done) and then `exec`s the upstream `main-wrapper.sh`. Two consequences: its logs land on the container's stdout, which is what `railway logs` collects, and the container's fate still follows the gateway — when the gateway exits, the container exits. A Web UI crash restarts itself after 5 s; it does not take the gateway down with it.
+
+**Agent integration.** The UI imports `run_agent.AIAgent` into its own process rather than talking to the gateway over HTTP. `HERMES_WEBUI_AGENT_DIR=/opt/hermes` points it at the agent source in the image, and its `managed_agent_startup` hook runs the agent's own `hermes_bootstrap`, which activates the same PM dependency generation the gateway uses. That is why the UI needs no Python packages of its own: `api/yaml_compat.py` falls back to the `ruamel.yaml` the agent ships (PyYAML is not in the agent's core pins), and `cryptography` already is. Nothing is installed at build or run time, so the UI creates no dependency generation and adds no volume bytes beyond its own state. The `Dockerfile` asserts both halves of that contract at build time, so an agent image that moves `run_agent.py` fails the build instead of shipping a UI whose chat 500s.
+
+**Volume footprint.** The 5 GB volume holds only UI state that is meant to persist:
+
+| Path | Contents |
+|---|---|
+| `/opt/hermes-webui` | UI source (~14 MB of the ~51 MB checkout; `tests/`, `docs/` and the manifests the runtime does not read are pruned). Image layer, not the volume. |
+| `/data/.hermes/webui/` | Sessions, UI settings, workspaces index, chat attachments, auth key. |
+| `/data/workspace/` | The workspace file browser's root, i.e. whatever the agent writes there. |
+
+`/data` itself arrives root-owned, so the entrypoint creates `/data/workspace` and opens it mode `1777` rather than chowning it: stage2 may remap the hermes UID to `HERMES_UID` afterwards, and an ownership set before that would be stranded on the old UID. If the directory cannot be created the Web UI falls back to a container-local workspace and the agent's files do not survive a redeploy.
+
+Everything else stays off the volume: the UI's `HOME` is `/opt/data` (container scratch), logs go to stdout rather than `state_dir/bootstrap-<port>.log`, and `HERMES_WEBUI_AUTO_INSTALL=0` keeps the UI from pip-installing anything into a PM generation on the volume. Uploads are capped at 20 MB each (`HERMES_WEBUI_MAX_UPLOAD_MB` to change); attachments accumulate under `/data/.hermes/webui/attachments`, so a heavy attachment workflow is the realistic way to grow this directory.
+
+**Access.** It binds `0.0.0.0:${PORT}` and requires the login password, so it is safe to leave unexposed. For Tailscale-only access, do not attach a public domain to the service — reach the container over the tailnet (or via a Tailscale sidecar on Railway's private network) and keep `PORT` as the listening port. Railway's health check uses `/health`, which is unauthenticated by design; it needs the port to stay bound, so if you unbind the port entirely, clear the health-check path in `railway.toml` as well rather than letting every deploy report unhealthy. On a fresh volume, cont-init seeds the PM dependency generation before either process starts, so the first boot can leave the port unbound — and the health check red — for minutes while it does.
+
+**Updating.** The UI is pinned to a commit in `ARG HERMES_WEBUI_REF` because it imports agent code in-process. Bump it to a newer `nesquena/hermes-webui` commit after reading the upstream changelog, and rebuild. `latest`-style drift here means the UI and the agent image move independently, which is exactly the failure the build-time assertions exist to catch.
+
 
 ### Telegram webhook mode and Serverless
 
